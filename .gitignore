@@ -218,10 +218,20 @@ __marimo__/
 .streamlit/secrets.toml
 
 
-# Data files
-nid_0006_front.png
-nid_0006_front.txt
-images/
-labels/
-synthetic/
-preview/
+# Data files (leading "/" = only the folders in the project root, so these
+# don't also match synthetic/rendered/images or synthetic/rendered/labels)
+/images/
+/labels/
+/preview/
+
+# Rendered images: ignore the contents but keep the folder itself
+synthetic/rendered/images/*
+synthetic/rendered/labels/*
+synthetic/rendered/manifest.csv
+synthetic/rendered/skipped.csv
+!synthetic/rendered/images/.gitkeep
+
+# Templates: ignore the contents (they hold real cardholder photos) but keep the folder
+synthetic/templates/*
+!synthetic/templates/.gitkeep
+
