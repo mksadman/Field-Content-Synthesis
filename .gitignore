@@ -235,8 +235,3 @@ synthetic/rendered/skipped.csv
 # Templates: ignore the contents (they hold real cardholder photos) but keep the folder
 synthetic/templates/*
 !synthetic/templates/.gitkeep
-
-synthetic/degraded/images/*
-synthetic/degraded/labels/*
-!synthetic/degraded/images/.gitkeep
-!synthetic/degraded/labels/.gitkeep
