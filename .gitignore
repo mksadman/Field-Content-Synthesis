@@ -238,6 +238,5 @@ synthetic/templates/*
 
 synthetic/degraded/images/*
 synthetic/degraded/labels/*
-synthetic/degraded/manifest.csv
-synthetic/degraded/skipped.csv
 !synthetic/degraded/images/.gitkeep
+!synthetic/degraded/labels/.gitkeep
