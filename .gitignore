@@ -235,3 +235,8 @@ synthetic/rendered/skipped.csv
 synthetic/templates/*
 !synthetic/templates/.gitkeep
 
+synthetic/degraded/images/*
+synthetic/degraded/labels/*
+synthetic/degraded/manifest.csv
+synthetic/degraded/skipped.csv
+!synthetic/degraded/images/.gitkeep
