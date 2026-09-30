@@ -1,0 +1,4 @@
+pillow>=10.0      # PyPI wheels include libraqm (needed for Bangla shaping)
+opencv-python-headless
+numpy
+pyyaml

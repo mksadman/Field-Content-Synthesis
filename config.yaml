@@ -1,0 +1,129 @@
+# =============================================================================
+# config.yaml -- settings for synthesize_one.py (Task B: field-content synthesis)
+#
+# Every tunable setting and random range lives here. Relative paths are
+# resolved against the folder this file is in.
+# =============================================================================
+
+# Class order is fixed (it is the YOLO class id). The script refuses to run if
+# this list is changed.
+class_names: [name_bn, name_en, guardian, mother, dob, nid]
+
+# Card type / layout used for this run. Must be a key under `layouts:`.
+layout: old
+
+# -----------------------------------------------------------------------------
+# Per-layout value formats. Add a new block here for each new card type.
+# -----------------------------------------------------------------------------
+layouts:
+  old:
+    # FILL: set from the value format printed on old-layout cards ("DD Mon YYYY").
+    # Tokens: %d day (2 digits), %m month (2 digits), %b Jan..Dec,
+    #         %B January..December, %Y 4-digit year.
+    date_format: "%d %b %Y"
+
+    # FILL: old cards print 13 digits with no spaces. `nid_groups` must add up
+    # to `nid_digits`; e.g. [3, 3, 4] with separator " " gives "123 456 7890".
+    nid_digits: 13
+    nid_groups: [13]
+    nid_separator: " "
+
+    # FILL: old cards print the English name in Title Case, not ALL CAPS.
+    english_name_all_caps: false
+
+    # FILL: old cards keep every value on a single line.
+    names_may_wrap: false
+    wrap_fields: [name_bn, name_en, guardian, mother]
+    wrap_line_spacing: 1.25          # line advance = spacing * font size
+
+    # Regions a box must never overlap, as normalised [x1, y1, x2, y2].
+    # Labels, borders and other printed text are found automatically (see
+    # `template:`); these cover parts that automatic detection can miss.
+    forbidden_regions:
+      photo:     [0.030, 0.345, 0.250, 0.735]
+      signature: [0.030, 0.780, 0.250, 0.880]
+      logo:      [0.020, 0.060, 0.140, 0.230]
+
+# -----------------------------------------------------------------------------
+# Fonts per field. `script` is bn (Bangla) or en (Latin); it controls shaping
+# language and how text height is measured. `font_index` selects a face inside
+# a .ttc collection.
+# -----------------------------------------------------------------------------
+fields:
+  name_bn:  {script: bn, font: "C:/Windows/Fonts/kalpurush.ttf", font_index: 0}
+  name_en:  {script: en, font: "C:/Windows/Fonts/arial.ttf",     font_index: 0}
+  guardian: {script: bn, font: "C:/Windows/Fonts/kalpurush.ttf", font_index: 0}
+  mother:   {script: bn, font: "C:/Windows/Fonts/kalpurush.ttf", font_index: 0}
+  dob:      {script: en, font: "C:/Windows/Fonts/arial.ttf",     font_index: 0}
+  nid:      {script: en, font: "C:/Windows/Fonts/arialbd.ttf",   font_index: 0}
+
+fonts:
+  size_range: [8, 150]               # font sizes (px) searched when matching height
+  # Reference strings used to match rendered height to measured height.
+  # bn: matra (head-line) to baseline; en: cap/digit top to baseline.
+  reference_text:
+    bn: "কখগঘচজটডতদনপবমরলস"
+    en: "HE0123456789"
+  # Fields printed at the same size on this layout: they share one font size
+  # (median of their measured heights). Use [] to size every field on its own.
+  shared_size_groups:
+    - [name_bn, guardian, mother]
+  # Extra Bangla fonts to include in the shaping test (field fonts are always included).
+  bangla_preview_fonts:
+    - {font: "C:/Windows/Fonts/Nirmala.ttc", font_index: 0}
+  bangla_test_string: "ক্ষ ত্র জ্ঞ স্ত্র কি কু কে কৈ কো মুহাম্মদ রহমান"
+  bangla_test_size: 56
+  caption_font: "C:/Windows/Fonts/arial.ttf"
+  ink_alpha_threshold: 40            # alpha above this counts as ink when measuring widths
+
+# -----------------------------------------------------------------------------
+# Step 1: blank template
+# -----------------------------------------------------------------------------
+template:
+  bg_kernel_px: 25                   # closing kernel; must be wider than a text stroke
+  min_ink_contrast: 60               # darkness below local background to count as ink (0-255)
+  weak_ink_ratio: 0.35               # anti-aliased halo: weaker pixels near ink are erased too
+  halo_px: 3                         # how far from ink the halo can reach
+  halo_min_contrast: 18              # per-channel darkness that marks a coloured halo pixel
+  min_component_px: 6                # ignore specks smaller than this
+  darkest_ink_fraction: 0.30         # text colour = median of this darkest share of ink pixels
+  erase_dilate_px: 2                 # widen the erase mask by this much
+  bg_ring_px: 6                      # ring around the ink used to sample the background
+  plain_bg_max_spread: 14            # p95-p5 luminance of ring; above this = patterned -> inpaint
+  plain_fill_noise_scale: 1.0        # add noise matching the background's own grain
+  inpaint_extra_dilate_px: 1
+  inpaint_radius: 5
+  obstacle_abs_dark: 140             # luminance below this is always a non-background element
+  obstacle_min_px: 3                 # dark pixels in a column needed to count as an obstacle
+  safety_gap_px: 8                   # gap kept before the next element on the line
+
+# -----------------------------------------------------------------------------
+# Steps 3-4: generation
+# -----------------------------------------------------------------------------
+paths:
+  names_file: fake_names.yaml
+  out_root: synthetic
+
+generation:
+  num_samples: 20                    # fake cards attempted per run
+  refill_dropped: false              # true = keep generating until num_samples pass the checks
+  refill_max_factor: 3               # cap on attempts when refilling (x num_samples)
+  seed: 12345
+  name_words: [1, 5]                 # words per name
+  hard_case_fraction: 0.20           # cards that use the longest name that still fits
+  hard_candidates: 300               # candidates tried when searching for the longest fit
+  wrap_fraction: 0.25                # share of non-hard cards that get wrapped names (if wrapping is on)
+  max_value_tries: 60
+  dob_years: [1940, 1990]            # adult birth years for old cards
+
+augment:
+  jitter_px: [1, 2]                  # shift magnitude per axis, random sign
+  darkness: [0.88, 1.12]             # ink darkness factor (>1 darker, <1 lighter)
+  blur_sigma: [0.0, 0.6]             # Gaussian sigma, text area only
+
+checks:
+  min_box_height_px: 10
+  max_iou: 0.30
+  forbidden_px_tolerance: 0          # label/photo pixels allowed inside a box
+  ink_change_threshold: 30           # pixel change that counts as drawn ink (for the box)
+  any_change_threshold: 3            # any visible change; must stay inside the box

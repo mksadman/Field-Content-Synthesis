@@ -216,3 +216,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+
+# Data files
+nid_0006_front.png
+nid_0006_front.txt
+synthetic/
+images/
