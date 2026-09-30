@@ -1,16 +1,34 @@
 # =============================================================================
-# config.yaml -- settings for synthesize_one.py (Task B: field-content synthesis)
+# config.yaml -- settings for synthesize_one.py and synthesize_batch.py
+#                (Task B: field-content synthesis)
 #
 # Every tunable setting and random range lives here. Relative paths are
 # resolved against the folder this file is in.
 # =============================================================================
 
-# Class order is fixed (it is the YOLO class id). The script refuses to run if
+# Class order is fixed (it is the YOLO class id). The scripts refuse to run if
 # this list is changed.
 class_names: [name_bn, name_en, guardian, mother, dob, nid]
 
-# Card type / layout used for this run. Must be a key under `layouts:`.
+# Card type used by synthesize_one.py. (synthesize_batch.py takes the card
+# type from each image's folder instead -- see `batch.layout_folders`.)
 layout: old
+
+# -----------------------------------------------------------------------------
+# synthesize_batch.py
+# -----------------------------------------------------------------------------
+batch:
+  images_dir: images                 # searched recursively for png/jpg
+  labels_dir: labels                 # <image name>.txt, flat folder
+  # Subfolder of images_dir -> card type. Images anywhere else are skipped.
+  layout_folders:
+    images_old: old
+    images_smart: smart
+  samples_per_card: 6                # synthetic images per source card
+  hard_per_card: 1                   # of those, how many are hard cases
+  max_retries: 3                     # new values tried when a sample fails the checks
+  preview_dir: preview               # box overlays, next to synthetic/
+  layout_balance_warn: 1.5           # warn if one layout has this many times the other
 
 # -----------------------------------------------------------------------------
 # Per-layout value formats. Add a new block here for each new card type.
@@ -44,6 +62,51 @@ layouts:
       signature: [0.030, 0.780, 0.250, 0.880]
       logo:      [0.020, 0.060, 0.140, 0.230]
 
+    # Anything under `overrides` replaces the global setting of the same name
+    # for this card type only (fields/fonts/generation/template/augment/checks).
+    overrides:
+      generation:
+        dob_years: [1940, 1990]      # old cards were issued 2008-2015 to adults
+      template:
+        # No mesh pattern on old cards, so obstacles can be fainter and
+        # smaller: this keeps the grey dashes of the right-hand border.
+        obstacle_min_contrast: 60
+        obstacle_min_area_px: 6
+        thin_line_open_px: 0         # no guilloche lines to cut off the text
+
+  smart:
+    # Smart cards: "DD Mon YYYY", 10-digit NID printed "123 456 7890",
+    # English name in ALL CAPS, one line per value, all values in black.
+    date_format: "%d %b %Y"
+    nid_digits: 10
+    nid_groups: [3, 3, 4]
+    nid_separator: " "
+    english_name_all_caps: true
+    names_may_wrap: false
+    wrap_fields: [name_bn, name_en, guardian, mother]
+    wrap_line_spacing: 1.25
+
+    # No photo rectangle: its edge sits close to the values and moves with the
+    # crop, so it is found automatically from its dark pixels instead. The
+    # chip and the ghost photo are pale (hard to detect) but always far right
+    # of the values, so generous rectangles are safe for them.
+    forbidden_regions:
+      chip:        [0.70, 0.40, 0.97, 0.75]
+      ghost_photo: [0.78, 0.05, 1.00, 0.38]
+
+    overrides:
+      generation:
+        dob_years: [1935, 2002]      # smart cards (2016+) go to all adults
+      fields:
+        name_bn:  {font: "C:/Windows/Fonts/kalpurush.ttf", font_index: 0}
+        # Smart cards print Latin text condensed: Arial Narrow matches both the
+        # height and the width of their name, DOB and NID (plain Arial is too wide).
+        name_en:  {font: "C:/Windows/Fonts/ARIALNB.TTF",   font_index: 0}
+        guardian: {font: "C:/Windows/Fonts/kalpurush.ttf", font_index: 0}
+        mother:   {font: "C:/Windows/Fonts/kalpurush.ttf", font_index: 0}
+        dob:      {font: "C:/Windows/Fonts/ARIALN.TTF",    font_index: 0}
+        nid:      {font: "C:/Windows/Fonts/ARIALNB.TTF",   font_index: 0}
+
 # -----------------------------------------------------------------------------
 # Fonts per field. `script` is bn (Bangla) or en (Latin); it controls shaping
 # language and how text height is measured. `font_index` selects a face inside
@@ -58,7 +121,7 @@ fields:
   nid:      {script: en, font: "C:/Windows/Fonts/arialbd.ttf",   font_index: 0}
 
 fonts:
-  size_range: [8, 150]               # font sizes (px) searched when matching height
+  size_range: [6, 300]               # font sizes (px) searched when matching height
   # Reference strings used to match rendered height to measured height.
   # bn: matra (head-line) to baseline; en: cap/digit top to baseline.
   reference_text:
@@ -75,26 +138,60 @@ fonts:
   bangla_test_size: 56
   caption_font: "C:/Windows/Fonts/arial.ttf"
   ink_alpha_threshold: 40            # alpha above this counts as ink when measuring widths
+  # DOB/NID keep their format, so a same-format value must not come out wider
+  # than the original by more than this share; if the height-matched size
+  # would (blur inflates small heights), the size is matched to the width.
+  width_cap_tolerance: 0.08
 
 # -----------------------------------------------------------------------------
 # Step 1: blank template
 # -----------------------------------------------------------------------------
 template:
-  bg_kernel_px: 25                   # closing kernel; must be wider than a text stroke
+  # Settings ending in _px (and inpaint_radius) are tuned for a card this wide
+  # and scaled to each image's width (min_component_px scales with area).
+  reference_width_px: 1062
+  bg_kernel_px: 41                   # closing kernel; must be wider than a text stroke
   min_ink_contrast: 60               # darkness below local background to count as ink (0-255)
-  weak_ink_ratio: 0.35               # anti-aliased halo: weaker pixels near ink are erased too
-  halo_px: 3                         # how far from ink the halo can reach
+  # Faded coloured print (pale orange/red digits) barely differs in luminance.
+  # If the luminance pass finds less ink than this share of the box, the
+  # per-channel darkness is tried with its own floor.
+  fallback_ink_fraction: 0.02
+  min_ink_contrast_color: 20
+  # Ink lying wholly above/below the value's text line by more than this share
+  # of the line height is a label or speck, not value ink (never erased).
+  main_line_area_ratio: 0.25         # components this share of the largest one define the line
+  main_line_gap_ratio: 0.08
+  # Ink is searched in the box padded by this share of its height, so value
+  # ink poking out of a tight box is erased too. A component with less than
+  # min_inside_fraction of its pixels inside the box is not part of the value.
+  box_pad_ratio: 0.35
+  min_inside_fraction: 0.6
+  thin_line_open_px: 1               # opening radius that cuts 1-2 px guilloche lines off the text
+  attach_px: 6                       # dark pixels this close to the value's strokes are erased with it
+  min_margin_px: 2                   # smallest box margin (real boxes are sometimes tighter than the ink)
+  weak_ink_ratio: 0.25               # anti-aliased halo: weaker pixels near ink are erased too
+  halo_px: 5                         # how far from ink the halo can reach
   halo_min_contrast: 18              # per-channel darkness that marks a coloured halo pixel
   min_component_px: 6                # ignore specks smaller than this
   darkest_ink_fraction: 0.30         # text colour = median of this darkest share of ink pixels
   erase_dilate_px: 2                 # widen the erase mask by this much
+  erase_close_px: 3                  # close gaps in the erase mask (cores of heavy strokes)
   bg_ring_px: 6                      # ring around the ink used to sample the background
   plain_bg_max_spread: 14            # p95-p5 luminance of ring; above this = patterned -> inpaint
   plain_fill_noise_scale: 1.0        # add noise matching the background's own grain
-  inpaint_extra_dilate_px: 1
+  inpaint_extra_dilate_px: 2
   inpaint_radius: 5
-  obstacle_abs_dark: 140             # luminance below this is always a non-background element
+  # Obstacles (labels, photo, chip, borders) are far darker than the pattern
+  # behind the values, so they use their own, higher contrast threshold.
+  obstacle_min_contrast: 100
+  obstacle_abs_dark: 100             # luminance below this is always a non-background element (photo, black text)
+  obstacle_min_area_px: 25           # smaller dark specks (mesh fragments) are not obstacles
   obstacle_min_px: 3                 # dark pixels in a column needed to count as an obstacle
+  # Long thin curves (guilloche security pattern) are background, not obstacles:
+  # a component at least this long whose mean width (area / length) is at most
+  # pattern_line_max_width_px is dropped from the obstacle mask.
+  pattern_line_min_length_px: 40
+  pattern_line_max_width_px: 3
   safety_gap_px: 8                   # gap kept before the next element on the line
 
 # -----------------------------------------------------------------------------
@@ -114,7 +211,7 @@ generation:
   hard_candidates: 300               # candidates tried when searching for the longest fit
   wrap_fraction: 0.25                # share of non-hard cards that get wrapped names (if wrapping is on)
   max_value_tries: 60
-  dob_years: [1940, 1990]            # adult birth years for old cards
+  dob_years: [1940, 1990]            # default; each layout overrides it
 
 augment:
   jitter_px: [1, 2]                  # shift magnitude per axis, random sign
@@ -126,4 +223,4 @@ checks:
   max_iou: 0.30
   forbidden_px_tolerance: 0          # label/photo pixels allowed inside a box
   ink_change_threshold: 30           # pixel change that counts as drawn ink (for the box)
-  any_change_threshold: 3            # any visible change; must stay inside the box
+  any_change_threshold: 10           # visible change (fainter blur halo is invisible); must stay inside the box

@@ -85,10 +85,6 @@ def load_config(path: str) -> dict:
         raise SynthError(f"class_names must be exactly {list(CLASS_NAMES)} (fixed order)")
     if cfg["layout"] not in cfg["layouts"]:
         raise SynthError(f"layout '{cfg['layout']}' has no block under 'layouts:'")
-
-    lay = cfg["layouts"][cfg["layout"]]
-    if sum(lay["nid_groups"]) != lay["nid_digits"]:
-        raise SynthError("nid_groups must add up to nid_digits")
     for name in CLASS_NAMES:
         if name not in cfg["fields"]:
             raise SynthError(f"config.yaml 'fields' has no entry for '{name}'")
@@ -102,6 +98,139 @@ def cfg_path(cfg: dict, rel: str) -> Path:
     """Resolve a path from the config relative to the config file's folder."""
     p = Path(rel)
     return p if p.is_absolute() else cfg["_dir"] / p
+
+
+def _deep_merge(base: dict, over: dict) -> dict:
+    out = dict(base)
+    for k, v in over.items():
+        out[k] = _deep_merge(out[k], v) if isinstance(v, dict) and isinstance(out.get(k), dict) else v
+    return out
+
+
+def layout_settings(cfg: dict, layout: str) -> tuple[dict, dict]:
+    """(cfg, layout_cfg) for one card type.
+
+    A layout block may carry `overrides:` with any top-level section (fields,
+    fonts, generation, template, augment, checks); they are merged over the
+    global settings, so e.g. smart cards can use their own fonts and birth years.
+    """
+    if layout not in cfg["layouts"]:
+        raise SynthError(f"layout '{layout}' has no block under 'layouts:'")
+    lay = cfg["layouts"][layout]
+    if sum(lay["nid_groups"]) != lay["nid_digits"]:
+        raise SynthError(f"layout '{layout}': nid_groups must add up to nid_digits")
+    merged = _deep_merge(cfg, lay.get("overrides", {}))
+    for name in CLASS_NAMES:
+        font = Path(merged["fields"][name]["font"])
+        if not font.is_file():
+            raise SynthError(f"layout '{layout}': font for field '{name}' not found: {font}")
+    return merged, lay
+
+
+# Template settings measured in pixels (tuned at template.reference_width_px)
+# and whether they scale with length or with area.
+_PIXEL_SETTINGS = {"bg_kernel_px": 1, "halo_px": 1, "erase_dilate_px": 1, "bg_ring_px": 1,
+                   "inpaint_radius": 1, "inpaint_extra_dilate_px": 1, "safety_gap_px": 1,
+                   "obstacle_min_px": 1, "min_component_px": 2, "thin_line_open_px": 1,
+                   "pattern_line_min_length_px": 1, "pattern_line_max_width_px": 1,
+                   "obstacle_min_area_px": 2, "erase_close_px": 1, "attach_px": 1}
+# May scale down to 0 (e.g. no line opening on a tiny card, where it would eat the text).
+_PIXEL_SETTINGS_MIN0 = {"thin_line_open_px"}
+
+
+def scale_pixel_settings(cfg: dict, image_width: int) -> dict:
+    """Copy of cfg with the pixel-sized template settings scaled to this image.
+
+    Cards range from ~300 to ~1500 px wide; a stroke-removal kernel or safety
+    gap tuned on a 1062 px card is wrong at other sizes. Jitter and the check
+    limits stay in absolute pixels on purpose (they are rules, not tuning).
+    """
+    tc = dict(cfg["template"])
+    s = image_width / tc["reference_width_px"]
+    for key, power in _PIXEL_SETTINGS.items():
+
+
+
+        tc[key] = max(0 if key in _PIXEL_SETTINGS_MIN0 else 1, int(round(tc[key] * s ** power)))
+    tc["bg_kernel_px"] = max(3, tc["bg_kernel_px"] | 1)  # odd, >= 3
+    return {**cfg, "template": tc}
+
+
+def _format_samples(name: str, layout_cfg: dict) -> list[str]:
+    """Values with the same character layout as the card's DOB / NID."""
+    if name == "nid":
+        digits = "8" * layout_cfg["nid_digits"]
+        parts, i = [], 0
+        for g in layout_cfg["nid_groups"]:
+            parts.append(digits[i:i + g])
+            i += g
+        return [layout_cfg["nid_separator"].join(parts)]
+    return [format_date(dt.date(1975, m, 15), layout_cfg["date_format"]) for m in range(1, 13)]
+
+
+def width_capped_size(fc: dict, name: str, size: int, orig_width: int, layout_cfg: dict, cfg: dict):
+    """Cap a height-matched size for fixed-format fields (DOB, NID).
+
+    Blur thickens every stroke, which inflates a small measured height a lot
+    (a 45 px digit can measure 59 px) but a long width hardly at all. The
+    fake DOB/NID has the same format as the original, so a same-format value
+    must not come out clearly wider than the original did. Returns the size
+    to use and whether the width decided it.
+    """
+    samples = _format_samples(name, layout_cfg)
+    lang = lang_of(fc["script"])
+
+    def width(sz):
+        font = load_font(fc["font"], fc.get("font_index", 0), sz)
+        ws = []
+        for t in samples:
+            mask, _ = render_mask([t], font, lang)
+            cols = np.nonzero((mask > cfg["fonts"]["ink_alpha_threshold"]).any(axis=0))[0]
+            ws.append(cols[-1] - cols[0] + 1)
+        return float(np.median(ws))
+
+    limit = orig_width * (1 + cfg["fonts"]["width_cap_tolerance"])
+    if width(size) <= limit:
+        return size, False
+    lo = cfg["fonts"]["size_range"][0]
+    while size > lo and width(size) > orig_width:
+        size -= 1
+    return size, True
+
+
+def assign_fonts(fields: dict, cfg: dict, verbose: bool = True, layout_cfg: dict | None = None):
+    """Step 2.3/2.5: pick the font size per field and store font info in `fields`.
+
+    Fields printed at one size (e.g. the three Bangla names) share the median
+    of their measured heights, so one noisy measurement cannot skew a field.
+    With `layout_cfg`, DOB and NID sizes are also capped by the original's
+    width (see width_capped_size).
+    """
+    target_h = {n: f["ref_height"] for n, f in fields.items()}
+    for group in cfg["fonts"].get("shared_size_groups", []):
+        shared = int(round(np.median([fields[n]["ref_height"] for n in group])))
+        target_h.update({n: shared for n in group})
+    for name, f in fields.items():
+        fc = cfg["fields"][name]
+        size, offset, got = pick_font_size(fc, target_h[name], cfg)
+        by_width = False
+        if layout_cfg is not None and name in ("dob", "nid"):
+            capped, by_width = width_capped_size(fc, name, size, f["orig_ink_width"], layout_cfg, cfg)
+            if by_width:
+                size = capped
+                # Re-measure the anchor offset at the new size.
+                font = load_font(fc["font"], fc.get("font_index", 0), size)
+                mask, (_, ay) = render_mask([cfg["fonts"]["reference_text"][fc["script"]]], font,
+                                            lang_of(fc["script"]))
+                m = text_metrics(mask > 127, fc["script"])
+                offset, got = m["anchor_y"] - ay, m["ref_height"]
+        f["font"] = {"path": fc["font"], "index": fc.get("font_index", 0), "size": size,
+                     "draw_baseline_y": f["anchor_y"] - offset, "rendered_ref_height": got,
+                     "size_source": "width" if by_width else "height"}
+        if verbose:
+            print(f"    {name:9s} {Path(fc['font']).name:14s} size={size:3d} "
+                  f"(ref height measured {f['ref_height']}, target {target_h[name]}, rendered {got}"
+                  + (", capped by original width" if by_width else "") + ")")
 
 
 def read_yolo_labels(path: str, width: int, height: int) -> dict[int, tuple]:
@@ -219,45 +348,129 @@ def text_metrics(mask: np.ndarray, script: str) -> dict:
 # =============================================================================
 # Step 1: blank template
 # =============================================================================
+def _value_components(d: np.ndarray, inside: np.ndarray, min_contrast: int, tc: dict):
+    """Split the ink around one box (darkness map `d`, padded crop) into value
+    ink and foreign ink. `inside` marks the real box within the crop.
+
+    - Thin background lines (guilloche, 1-2 px) are opened away before
+      grouping pixels into components, so they cannot glue letters to each
+      other or to the box edge; the letters' own thin parts are added back.
+    - Foreign = components mostly outside the box (a label, border or the
+      neighbouring value reaching in) and components lying wholly above/below
+      the value's text line with a clear gap (a small label printed inside
+      the box, specks). Diacritics that touch the line stay with the value.
+    Returns (keep, attached, foreign, thr), all masks over the padded crop (so
+    value ink poking out of a tight box is still erased). `keep` is the value
+    ink used for measuring; `attached` is every dark pixel connected to it
+    (thin stroke ends the opening cut off, and any line glued to a letter),
+    which must be erased too.
+    """
+    otsu, _ = cv2.threshold(d[inside].reshape(-1, 1), 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    thr = max(min_contrast, otsu)
+    strong = d > thr
+    r = tc["thin_line_open_px"]
+    core = cv2.morphologyEx(strong.astype(np.uint8), cv2.MORPH_OPEN, ellipse(r)) if r > 0 else strong.astype(np.uint8)
+    n, lab, stats, _ = cv2.connectedComponentsWithStats(core, connectivity=8)
+    in_px = np.bincount(lab[inside], minlength=n)
+
+    inner, foreign_ids = [], []
+    for i in range(1, n):
+        area = stats[i][4]
+        if area < tc["min_component_px"] or in_px[i] == 0:
+            continue
+        (inner if in_px[i] >= tc["min_inside_fraction"] * area else foreign_ids).append(i)
+
+    if inner:
+        # The text line = vertical extent of the large components.
+        amax = max(stats[i][4] for i in inner)
+        big = [i for i in inner if stats[i][4] >= tc["main_line_area_ratio"] * amax]
+        top = min(stats[i][1] for i in big)
+        bottom = max(stats[i][1] + stats[i][3] for i in big)
+        max_gap = tc["main_line_gap_ratio"] * (bottom - top)
+        keep_ids = []
+        for i in inner:
+            y, h = stats[i][1], stats[i][3]
+            gap = top - (y + h) if y + h <= top else (y - bottom if y >= bottom else 0)
+            (keep_ids if gap <= max_gap else foreign_ids).append(i)
+        # Real boxes are sometimes drawn tighter than the value, so its last
+        # letters fall mostly outside the box. Labels are only ever left of or
+        # above/below a value, never on its line to the right, so a component
+        # centred on the text line at/after the value's start is value ink.
+        if keep_ids:
+            left = min(stats[i][0] for i in keep_ids)
+            for i in list(foreign_ids):
+                x, y, w, h = stats[i][:4]
+                if x >= left and top <= y + h / 2 <= bottom and stats[i][4] >= tc["min_component_px"]:
+                    foreign_ids.remove(i)
+                    keep_ids.append(i)
+    else:
+        keep_ids = []
+
+    keep = strong & dilate(np.isin(lab, keep_ids), r + 1)
+    foreign = strong & dilate(np.isin(lab, foreign_ids), r + 1) & ~keep
+    # Only near the value's own strokes: a label whose thin strokes vanished in
+    # the opening can be glued to the value by a pattern line, and must survive.
+    _, lab_s = cv2.connectedComponents(strong.astype(np.uint8), connectivity=8)
+    touching = np.unique(lab_s[keep])
+    attached = np.isin(lab_s, touching[touching > 0]) & ~foreign & dilate(keep, tc["attach_px"])
+    return keep, attached, foreign, thr
+
+
 def detect_value_ink(dark: np.ndarray, dark_color: np.ndarray, box, tc: dict):
     """Find the value's ink pixels inside one box.
 
     `dark` is luminance darkness (finds the solid text); `dark_color` is the
     per-channel maximum darkness, which also catches coloured halos (e.g. the
-    pink fringe around red text) that are almost as bright as the paper.
+    pink fringe around red text) and faded coloured print (pale orange
+    digits) that is almost as bright as the paper. The colour map is only
+    used for the text itself when the luminance pass finds (almost) nothing.
 
     Returns (ink, erase, foreign): full-size bool masks. `ink` is the solid
     text used for measuring, `erase` adds its anti-aliased / coloured halo,
-    `foreign` holds components that touch the box edge (probably a label or
-    border reaching in) -- those are never erased.
+    `foreign` holds ink that is not part of the value (see
+    _value_components) -- it is never erased.
     """
     H, W = dark.shape
     x1, y1, x2, y2 = box
-    d = dark[y1:y2, x1:x2]
-    otsu, _ = cv2.threshold(d, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    thr = max(tc["min_ink_contrast"], otsu)
-    strong = (d > thr).astype(np.uint8)
+    pad = max(3, int(round(tc["box_pad_ratio"] * (y2 - y1))))
+    X1, Y1, X2, Y2 = max(0, x1 - pad), max(0, y1 - pad), min(W, x2 + pad), min(H, y2 + pad)
+    d, dc = dark[Y1:Y2, X1:X2], dark_color[Y1:Y2, X1:X2]
+    inside = np.zeros(d.shape, bool)
+    inside[y1 - Y1:y2 - Y1, x1 - X1:x2 - X1] = True
 
-    n, lab, stats, _ = cv2.connectedComponentsWithStats(strong, connectivity=8)
-    keep = np.zeros(d.shape, bool)
-    foreign = np.zeros(d.shape, bool)
-    for i in range(1, n):
-        x, y, w, h, area = stats[i]
-        if area < tc["min_component_px"]:
-            continue
-        if x == 0 or y == 0 or x + w == d.shape[1] or y + h == d.shape[0]:
-            foreign |= lab == i
-        else:
-            keep |= lab == i
+    keep, attached, foreign, thr = _value_components(d, inside, tc["min_ink_contrast"], tc)
+    keep_c, attached_c, foreign_c, thr_c = _value_components(dc, inside, tc["min_ink_contrast_color"], tc)
+    extra = np.zeros(d.shape, bool)
+    if keep.sum() < tc["fallback_ink_fraction"] * inside.sum():
+        if keep_c.sum() > keep.sum():
+            keep, attached, foreign, thr, d = keep_c, attached_c, foreign_c, thr_c, dc
+    elif keep.any():
+        # Unevenly lit print: part of a coloured value (e.g. the last NID
+        # digits) can be too faint for the luminance pass. Colour-pass ink on
+        # the value's own line, from its start rightwards, is erased as well.
+        bx1, by1, bx2, by2 = mask_bbox(keep)
+        extra = keep_c & ~dilate(keep, tc["halo_px"])
+        extra[:by1] = extra[by2 + 1:] = False
+        extra[:, :bx1] = False
 
     # Halo: weaker (or merely coloured) pixels, only right next to the text so
     # the watermark further away is left alone.
-    weak = (d > thr * tc["weak_ink_ratio"]) | (dark_color[y1:y2, x1:x2] > tc["halo_min_contrast"])
-    erase = (keep | (weak & dilate(keep, tc["halo_px"]))) & ~dilate(foreign, 1)
+    weak = (d > thr * tc["weak_ink_ratio"]) | (dc > tc["halo_min_contrast"])
+    erase = keep | attached | (weak & dilate(keep | attached, tc["halo_px"])) | dilate(extra, tc["halo_px"])
+    # Heavy, blurry strokes can be wider than the background kernel, leaving
+    # their cores undetected; close small gaps and fill enclosed holes so no
+    # dark core survives the erase (erasing a letter's counter is harmless).
+    r = tc["erase_close_px"]
+    if r > 0:
+        erase = cv2.morphologyEx(erase.astype(np.uint8), cv2.MORPH_CLOSE, ellipse(r)).astype(bool)
+    reach = np.pad(erase, 1).astype(np.uint8)
+    cv2.floodFill(reach, None, (0, 0), 1)
+    erase |= reach[1:-1, 1:-1] == 0
+    erase &= ~dilate(foreign, 1)
 
     def full(local):
         out = np.zeros((H, W), bool)
-        out[y1:y2, x1:x2] = local
+        out[Y1:Y2, X1:X2] = local
         return out
 
     return full(keep), full(erase), full(foreign)
@@ -291,15 +504,27 @@ def obstacle_mask(img: np.ndarray, cfg: dict, layout_cfg: dict) -> np.ndarray:
     H, W = img.shape[:2]
     gray = to_gray(img)
     dark = darkness_map(gray, tc["bg_kernel_px"])
-    obs = (dark > tc["min_ink_contrast"]) | (gray < tc["obstacle_abs_dark"])
-    obs = cv2.morphologyEx(obs.astype(np.uint8), cv2.MORPH_OPEN, np.ones((2, 2), np.uint8)).astype(bool)
+    obs = (dark > tc["obstacle_min_contrast"]) | (gray < tc["obstacle_abs_dark"])
+    obs = cv2.morphologyEx(obs.astype(np.uint8), cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
+
+    # Drop background pattern: long thin curves (guilloche) that cross the
+    # value lines on smart cards, and mesh fragments too small to be a label
+    # letter. Labels, photo and borders are compact, larger shapes.
+    n, lab, stats, _ = cv2.connectedComponentsWithStats(obs, connectivity=8)
+    length = np.maximum(stats[:, 2], stats[:, 3])
+    thin = (length >= tc["pattern_line_min_length_px"]) & \
+           (stats[:, 4] <= tc["pattern_line_max_width_px"] * length)
+    pattern = thin | (stats[:, 4] < tc["obstacle_min_area_px"])
+    pattern[0] = False
+    obs = obs.astype(bool) & ~pattern[lab]
+
     for nx1, ny1, nx2, ny2 in layout_cfg.get("forbidden_regions", {}).values():
         obs[int(ny1 * H):int(ny2 * H), int(nx1 * W):int(nx2 * W)] = True
     return obs
 
 
 def make_blank_template(img, boxes, cfg, layout_cfg):
-    """Step 1: erase the 6 values and measure each field. Returns (blank, fields, obstacles)."""
+    """Step 1: erase the 6 values and measure each field. Returns (blank, fields, forbidden)."""
     tc = cfg["template"]
     H, W = img.shape[:2]
     dark = darkness_map(to_gray(img), tc["bg_kernel_px"])
@@ -309,6 +534,8 @@ def make_blank_template(img, boxes, cfg, layout_cfg):
     rng = np.random.default_rng(cfg["generation"]["seed"])  # only for the fill grain
     jitter_max = max(cfg["augment"]["jitter_px"])
     fields, inks = {}, {}
+    foreign_all = np.zeros((H, W), bool)   # labels / specks next to the values
+    erased_all = np.zeros((H, W), bool)
 
     for cid, name in enumerate(CLASS_NAMES):
         box = boxes[cid]
@@ -316,9 +543,10 @@ def make_blank_template(img, boxes, cfg, layout_cfg):
         ink, erase, foreign = detect_value_ink(dark, dark_color, box, tc)
         if not ink.any():
             raise SynthError(f"No text ink found inside the '{name}' box")
-        if foreign.any():
-            print(f"  note: '{name}': ink touching the box edge was left untouched "
-                  f"({int(foreign.sum())} px, probably a label or border)")
+        foreign_in_box = int(foreign[box[1]:box[3], box[0]:box[2]].sum())
+        if foreign_in_box:
+            print(f"  note: '{name}': ink outside the value line was left untouched "
+                  f"({foreign_in_box} px, probably a label, border or speck)")
 
         m = text_metrics(ink, script)
         ink_px = img[ink].reshape(-1, 3)
@@ -328,6 +556,8 @@ def make_blank_template(img, boxes, cfg, layout_cfg):
 
         method, spread = erase_ink(blank, erase, tc, rng)
         inks[name] = ink
+        foreign_all |= foreign
+        erased_all |= erase
         fields[name] = {
             "class_id": cid,
             "script": script,
@@ -340,11 +570,13 @@ def make_blank_template(img, boxes, cfg, layout_cfg):
             "ref_height": m["ref_height"],
             "orig_ink_width": m["right"] - m["left"] + 1,
             "color_rgb": [int(r), int(g), int(b)],
+            # A real box drawn tighter than the ink gives a negative margin;
+            # the synthetic box must always hold the whole text, so clamp.
             "margins": {
-                "left": m["left"] - box[0],
-                "top": m["top"] - box[1],
-                "right": (box[2] - 1) - m["right"],
-                "bottom": (box[3] - 1) - m["bottom"],
+                "left": max(tc["min_margin_px"], m["left"] - box[0]),
+                "top": max(tc["min_margin_px"], m["top"] - box[1]),
+                "right": max(tc["min_margin_px"], (box[2] - 1) - m["right"]),
+                "bottom": max(tc["min_margin_px"], (box[3] - 1) - m["bottom"]),
             },
             "erase_method": method,
             "bg_spread": round(spread, 1),
@@ -358,18 +590,36 @@ def make_blank_template(img, boxes, cfg, layout_cfg):
         leftover = int((obstacles[y1:y2, x1:x2] & dilate(inks[name], 2)[y1:y2, x1:x2]).sum())
         if leftover:
             print(f"  note: '{name}': {leftover} dark px remain where the value was erased")
-        sx = f["start_x"]
-        counts = obstacles[y1:y2, sx:].sum(axis=0)
+    # Where the real value was printed there can be no label or photo: anything
+    # dark left there is pattern or erase residue. Clear it so it neither ends
+    # the line nor makes the checks reject a box.
+    g = tc["erase_dilate_px"]
+    for f in fields.values():
+        obstacles[max(0, f["start_y"] - g):f["start_y"] + f["text_height"] + g,
+                  max(0, f["start_x"] - g):f["start_x"] + f["orig_ink_width"] + g] = False
+    for name, f in fields.items():
+        # Scan only the rows of the text line itself, so a small label printed
+        # just above or below the value (smart cards) does not end the line.
+        sx, ty1, ty2 = f["start_x"], f["start_y"], f["start_y"] + f["text_height"]
+        counts = obstacles[ty1:ty2, sx:].sum(axis=0)
         hits = np.nonzero(counts >= tc["obstacle_min_px"])[0]
         obstacle_x = sx + int(hits[0]) if hits.size else W
         f["obstacle_x"] = obstacle_x
         f["max_width"] = obstacle_x - tc["safety_gap_px"] - sx
-        # What the ink itself may use: the box margin and the jitter must also fit.
-        f["max_ink_width"] = f["max_width"] - f["margins"]["right"] - jitter_max
+        # What the ink itself may use: the jitter must also fit. The box's right
+        # margin is not subtracted -- fit_margins() trims it where the next
+        # element is closer, so a loosely drawn real box cannot shrink the value space.
+        f["max_ink_width"] = f["max_width"] - jitter_max
         if f["max_ink_width"] < 0.5 * f["orig_ink_width"]:
             raise SynthError(f"'{name}': measured max width ({f['max_ink_width']} px) is far below the "
                              f"original text width; check the erase step / obstacle settings")
-    return blank, fields, obstacles
+
+    # Regions a box must never cover: the strong obstacles above, plus the
+    # labels found right next to each value in the ink step (small smart-card
+    # labels are too faint for a global threshold on dim photos, but they are
+    # exactly the pixels a box could reach). Ink that was erased is not a label.
+    forbidden = obstacles | dilate(foreign_all & ~dilate(erased_all, 1), 1)
+    return blank, fields, forbidden
 
 
 # =============================================================================
@@ -693,19 +943,23 @@ def fit_margins(ink, margins, forbidden, gap: int = 1):
     if it touches a forbidden pixel, check_sample() drops the sample."""
     H, W = forbidden.shape
     x1, y1, x2, y2 = ink  # inclusive
-    L, T, R, B = margins["left"], margins["top"], margins["right"], margins["bottom"]
-    xa, xb = max(0, x1 - L), min(W, x2 + R + 1)
-
+    # The image border counts as forbidden too: keep at least 1 px inside it.
+    L, T = min(margins["left"], x1 - 1), min(margins["top"], y1 - 1)
+    R, B = min(margins["right"], W - 2 - x2), min(margins["bottom"], H - 2 - y2)
+    L, T, R, B = max(0, L), max(0, T), max(0, R), max(0, B)
     def shrink(strip_hits, margin):
         hits = np.nonzero(strip_hits)[0]
         return margin if hits.size == 0 else max(0, int(hits[0]) - gap)
 
-    # Each strip is ordered moving away from the ink.
+    # Each strip is ordered moving away from the ink. Left/right first, over
+    # the ink's own rows; then top/bottom over the trimmed width only, so an
+    # element beside the text (e.g. the card border) cannot cut the margin
+    # below it.
+    R = shrink(forbidden[y1:y2 + 1, x2 + 1:min(W, x2 + 1 + R)].any(axis=0), R)
+    L = shrink(forbidden[y1:y2 + 1, max(0, x1 - L):x1].any(axis=0)[::-1], L)
+    xa, xb = x1 - L, x2 + R + 1
     B = shrink(forbidden[y2 + 1:min(H, y2 + 1 + B), xa:xb].any(axis=1), B)
     T = shrink(forbidden[max(0, y1 - T):y1, xa:xb].any(axis=1)[::-1], T)
-    ya, yb = max(0, y1 - T), min(H, y2 + B + 1)
-    R = shrink(forbidden[ya:yb, x2 + 1:min(W, x2 + 1 + R)].any(axis=0), R)
-    L = shrink(forbidden[ya:yb, max(0, x1 - L):x1].any(axis=0)[::-1], L)
     return x1 - L, y1 - T, x2 + R + 1, y2 + B + 1
 
 
@@ -813,13 +1067,14 @@ def main(argv=None) -> int:
 
     cfg = load_config(args.config)
     layout = cfg["layout"]
-    layout_cfg = cfg["layouts"][layout]
+    cfg, layout_cfg = layout_settings(cfg, layout)
     gen_cfg = cfg["generation"]
 
     img = cv2.imread(args.image, cv2.IMREAD_COLOR)
     if img is None:
         raise SynthError(f"Could not read image: {args.image}")
     H, W = img.shape[:2]
+    cfg = scale_pixel_settings(cfg, W)
     boxes_orig = read_yolo_labels(args.label, W, H)
     source = re.sub(r"_(front|back)$", "", Path(args.image).stem)  # nid_0006_front -> nid_0006
     prefix = f"{source}_{layout}"
@@ -845,19 +1100,7 @@ def main(argv=None) -> int:
     # ---- Step 2: fonts ---------------------------------------------------------
     print("[2] Fonts")
     bangla_render_test(cfg, d_prev / "bangla_render_test.png")
-    # Fields printed at one size (e.g. the three Bangla names) share the median
-    # of their measured heights, so one noisy measurement cannot skew a field.
-    target_h = {n: f["ref_height"] for n, f in fields.items()}
-    for group in cfg["fonts"].get("shared_size_groups", []):
-        shared = int(round(np.median([fields[n]["ref_height"] for n in group])))
-        target_h.update({n: shared for n in group})
-    for name, f in fields.items():
-        fc = cfg["fields"][name]
-        size, offset, got = pick_font_size(fc, target_h[name], cfg)
-        f["font"] = {"path": fc["font"], "index": fc.get("font_index", 0), "size": size,
-                     "draw_baseline_y": f["anchor_y"] - offset, "rendered_ref_height": got}
-        print(f"    {name:9s} {Path(fc['font']).name:14s} size={size:3d} "
-              f"(ref height measured {f['ref_height']}, target {target_h[name]}, rendered {got})")
+    assign_fonts(fields, cfg, layout_cfg=layout_cfg)
 
     meta = {"source_image": Path(args.image).name, "source_card": source, "layout": layout,
             "image_size": [W, H], "class_names": list(CLASS_NAMES), "fields": fields}
