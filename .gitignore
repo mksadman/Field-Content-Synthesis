@@ -230,6 +230,7 @@ synthetic/rendered/labels/*
 synthetic/rendered/manifest.csv
 synthetic/rendered/skipped.csv
 !synthetic/rendered/images/.gitkeep
+!synthetic/rendered/labels/.gitkeep
 
 # Templates: ignore the contents (they hold real cardholder photos) but keep the folder
 synthetic/templates/*
