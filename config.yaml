@@ -27,7 +27,7 @@ batch:
   samples_per_card: 6                # synthetic images per source card
   hard_per_card: 1                   # of those, how many are hard cases
   max_retries: 3                     # new values tried when a sample fails the checks
-  preview_dir: preview               # box overlays, next to synthetic/
+  preview_dir: synthetic/rendered/preview   # box overlays
   layout_balance_warn: 1.5           # warn if one layout has this many times the other
 
 # -----------------------------------------------------------------------------

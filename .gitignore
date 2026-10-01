@@ -222,15 +222,16 @@ __marimo__/
 # don't also match synthetic/rendered/images or synthetic/rendered/labels)
 /images/
 /labels/
-/preview/
 
 # Rendered images: ignore the contents but keep the folder itself
 synthetic/rendered/images/*
 synthetic/rendered/labels/*
+synthetic/rendered/preview/*
 synthetic/rendered/manifest.csv
 synthetic/rendered/skipped.csv
 !synthetic/rendered/images/.gitkeep
 !synthetic/rendered/labels/.gitkeep
+!synthetic/rendered/preview/.gitkeep
 
 # Templates: ignore the contents (they hold real cardholder photos) but keep the folder
 synthetic/templates/*

@@ -1080,7 +1080,7 @@ def main(argv=None) -> int:
     prefix = f"{source}_{layout}"
 
     root = cfg_path(cfg, cfg["paths"]["out_root"])
-    d_tmpl, d_prev = root / "templates", root / "preview"
+    d_tmpl, d_prev = root / "templates", root / "rendered" / "preview"
     d_img, d_lbl = root / "rendered" / "images", root / "rendered" / "labels"
     for d in (d_tmpl, d_prev, d_img, d_lbl):
         d.mkdir(parents=True, exist_ok=True)
