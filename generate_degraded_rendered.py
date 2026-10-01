@@ -26,6 +26,7 @@ import cv2
 import csv
 import random
 import shutil
+from collections import defaultdict
 from pathlib import Path
 
 from generate_degraded import (
@@ -56,18 +57,31 @@ def load_source_lookup():
     return lookup
 
 
-def generate_variants_for_card(image_path, label_path, source_id, layout):
+def generate_variants_for_card(image_path, label_path, source_id, layout, name_counter):
+    """name_counter is a dict shared across ALL of this card's renders,
+    keyed by (source_id, layout). Task B makes up to 6 separate renders of
+    the same real card (clean_01..clean_06), and every one of them gets
+    processed here independently -- but they all share the same source_id
+    and layout, so if each render restarted its own variant numbering at
+    01, every render's output would reuse the exact same filenames and
+    silently overwrite the one before it (this is exactly what happened:
+    1,685 variants were generated and logged, but only ~377 unique files
+    survived on disk because later renders kept clobbering earlier ones).
+    Counting continuously per (source_id, layout) instead means every
+    variant of every render gets its own number, so nothing overwrites
+    anything."""
     stem = image_path.stem
     img = cv2.imread(str(image_path))
     labels = load_yolo_labels(label_path)
 
     rows = []
     n_variants = random.randint(*VARIANTS_PER_CARD_RANGE)
-    variant_idx = 1
+    made = 0
     attempts = 0
     max_attempts = n_variants * MAX_ATTEMPTS_PER_VARIANT
+    key = (source_id, layout)
 
-    while variant_idx <= n_variants and attempts < max_attempts:
+    while made < n_variants and attempts < max_attempts:
         attempts += 1
         op_names = make_picks(random.randint(2, 3))
         out_img, out_labels = apply_chain(op_names, img.copy(), labels)
@@ -75,14 +89,16 @@ def generate_variants_for_card(image_path, label_path, source_id, layout):
         if not ok:
             print(f"  [{stem}] dropped {op_names}: {reason}")
             continue
+        variant_idx = name_counter[key]
+        name_counter[key] += 1
         name = f"{source_id}_{layout}_ren-deg_{variant_idx:02d}"
         cv2.imwrite(str(OUT_IMAGES / f"{name}.jpg"), out_img)
         save_yolo_labels(OUT_LABELS / f"{name}.txt", out_labels)
         rows.append([name, source_id, layout, "+".join(op_names), SEED])
-        variant_idx += 1
+        made += 1
 
-    if len(rows) < n_variants:
-        print(f"  [{stem}] WARNING: only generated {len(rows)}/{n_variants} (some got dropped -- see reasons above)")
+    if made < n_variants:
+        print(f"  [{stem}] WARNING: only generated {made}/{n_variants} (some got dropped -- see reasons above)")
 
     return rows
 
@@ -100,6 +116,7 @@ if __name__ == "__main__":
     if not RENDERED_MANIFEST.exists():
         raise SystemExit(f"Can't find {RENDERED_MANIFEST} -- needed to look up each rendered card's source_id/layout.")
     lookup = load_source_lookup()
+    name_counter = defaultdict(lambda: 1)   # shared across all of a card's renders -- see generate_variants_for_card
 
     all_rows = []
     images = sorted(RENDERED_IMAGES.glob("*.png")) + sorted(RENDERED_IMAGES.glob("*.jpg"))
@@ -122,7 +139,7 @@ if __name__ == "__main__":
             continue
         print(f"Generating variants for {img_path.name}...")
         try:
-            all_rows.extend(generate_variants_for_card(img_path, label_path, source_id, layout))
+            all_rows.extend(generate_variants_for_card(img_path, label_path, source_id, layout, name_counter))
         except Exception as e:
             print(f"Skipping {img_path.name}: failed while generating variants -- {e}")
             continue
