@@ -224,3 +224,36 @@ checks:
   forbidden_px_tolerance: 0          # label/photo pixels allowed inside a box
   ink_change_threshold: 30           # pixel change that counts as drawn ink (for the box)
   any_change_threshold: 10           # visible change (fainter blur halo is invisible); must stay inside the box
+
+# -----------------------------------------------------------------------------
+# Back side (address) -- synthesize_back.py
+# The address block ("ঠিকানা: ...") is erased inside the box from coords_dir and
+# a made-up address (fake_addresses.yaml) is drawn in its place. The template,
+# augment and fonts.size_range settings above are reused.
+# -----------------------------------------------------------------------------
+back:
+  cards_dir: "C:/Users/sadman.khan/Downloads/back cards/cards"
+  coords_dir: "C:/Users/sadman.khan/Downloads/back cards/claude strips/coords"  # <card>.txt: x0 y0 x1 y1, rotated_180
+  gt_dir: "C:/Users/sadman.khan/Downloads/back cards/data"     # only `nid_version` is read, never the address
+  addresses_file: fake_addresses.yaml
+  out_dir: synthetic/back
+  samples_per_card: 5
+  seed: 2024
+  # One font is picked per sample. Both shape Bangla correctly with raqm.
+  fonts:
+    - {font: "C:/Windows/Fonts/kalpurush.ttf", font_index: 0, weight: 0.8}
+    - {font: "C:/Windows/Fonts/Siyamrupali.ttf", font_index: 0, weight: 0.2}
+  # Horizontal squeeze per nid_version: the printed fonts are narrower than the
+  # rendering fonts at the same height (median measured over 60 cards each).
+  x_scale: {regular: 0.90, smart: 0.87, unknown: 0.90}
+  # Tilted scans: the block is straightened for measuring and drawing (masks
+  # and the drawn text are rotated back; card pixels are never resampled).
+  deskew_max_deg: 4.0          # 0 turns deskewing off
+  deskew_step_deg: 0.2
+  deskew_min_deg: 0.3          # smaller tilts are ignored
+  max_value_tries: 80          # addresses tried per sample until one fits
+  extra_lines: 1               # lines allowed below the original ones, if that space is blank
+  blank_below_max_ink: 0.03    # share of columns with ink above which the space below counts as used
+  line_pitch_fallback: 1.9     # line pitch / matra-baseline height, for one-line originals
+  strip_pad_ratio: 0.25        # strip crop padding, as a share of the line pitch
+  box_margin_px: 2             # label box = rendered ink + this margin

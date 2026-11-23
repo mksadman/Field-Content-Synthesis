@@ -188,3 +188,8 @@ synthetic/templates/*
 # Degraded outputs
 synthetic/degraded/
 synthetic/degraded_rendered/
+synthetic/back/*
+
+/coordinates
+# Back-side (address) synthesis outputs
+synthetic/back/
