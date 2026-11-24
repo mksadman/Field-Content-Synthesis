@@ -25,6 +25,11 @@ Outputs (under back.out_dir, default synthetic/back):
   manifest.csv          one row per sample; skipped.csv lists every dropped sample
                         (sample = "all" when the whole card failed) and why
 
+The script writes images/, strips/ and labels/ flat, and leaves manifest `split`
+empty for new samples. synthetic/back was split by source card into
+{images,strips,labels}/{train,test}/ afterwards; split.csv (id, split, source_card)
+records the assignment, and --append keeps the `split` of existing rows.
+
 Usage
   python "image synthesis/synthesize_back.py" --config config.yaml -limit 5
 """
@@ -50,7 +55,7 @@ from synthesize_one import (  # noqa: E402  (reuse the front-side building block
 
 BN_DIGITS = str.maketrans("0123456789", "০১২৩৪৫৬৭৮৯")
 IMAGE_EXTS = {".png", ".jpg", ".jpeg"}
-MANIFEST_FIELDS = ["id", "source_card", "nid_version", "font", "font_size", "lines",
+MANIFEST_FIELDS = ["id", "split", "source_card", "nid_version", "font", "font_size", "lines",
                    "rotated_180", "skew_deg", "x1", "y1", "x2", "y2", "image_w", "image_h",
                    "dx", "dy", "darkness", "blur", "erase_method", "text", "text_lines"]
 
@@ -597,9 +602,19 @@ def process_card(img_path, coords_path, cfg, bc, data, gt_dir, out_dir, args, ro
     if box[2] - box[0] < 10 or box[3] - box[1] < 5:
         raise SynthError(f"address box too small: {box}")
 
+    start = args.sample_start
+    sample_ids = range(start, start + args.samples)
+    if args.append:   # never overwrite samples from an earlier run
+        # images/ may have been split into images/train and images/test
+        taken = [s for s in sample_ids if any((out_dir / "images").glob(f"**/{name}_s{s:02d}.png"))]
+        if taken:
+            raise SynthError(f"samples already exist (s{taken[0]:02d}...); raise --sample-start")
+
     cfgs = scale_pixel_settings(cfg, W)
     tc = cfgs["template"]
-    rng = np.random.default_rng(card_seed(bc["seed"], name))
+    # A later --sample-start gets its own random stream, so it never repeats the
+    # addresses of s00.. (start 0 keeps the original stream).
+    rng = np.random.default_rng(card_seed(bc["seed"], name if not start else f"{name}#{start}"))
 
     # Straighten a tilted block: measure and draw in the straight frame.
     angle = 0.0
@@ -639,7 +654,9 @@ def process_card(img_path, coords_path, cfg, bc, data, gt_dir, out_dir, args, ro
     layouts: dict[int, Layout] = {}
     gen = FakeAddress(data, rng)
     n_done = 0
-    for s in range(args.samples):
+    for s in sample_ids:
+        if args.budget is not None and args.budget <= 0:
+            break
         fi = int(rng.choice(len(fonts), p=weights))
         if fi not in layouts:
             layouts[fi] = Layout(lines, box, version, fonts[fi], cfgs, bc, dark, gray, paper, tc)
@@ -704,8 +721,10 @@ def process_card(img_path, coords_path, cfg, bc, data, gt_dir, out_dir, args, ro
                      "dx": prm["dx"], "dy": prm["dy"], "darkness": prm["darkness"], "blur": prm["blur"],
                      "erase_method": method, "text": flat, "text_lines": " | ".join(text_lines)})
         n_done += 1
+        if args.budget is not None:
+            args.budget -= 1
 
-    lay0 = next(iter(layouts.values()), None)
+    lay0 =next(iter(layouts.values()), None)
     detail = f", ref height {lay0.ref_h}px, max {lay0.max_lines} line(s)" if lay0 else ""
     print(f"  {name}: {version}, {len(lines)} original line(s){detail}, erase={method}, "
           f"{n_done}/{args.samples} samples")
@@ -727,7 +746,14 @@ def main(argv=None) -> int:
     ap.add_argument("--seed", type=int, default=None, help="override back.seed")
     ap.add_argument("--preview", action="store_true", help="also save box overlays")
     ap.add_argument("--save-blank", action="store_true", help="also save each erased card")
+    ap.add_argument("--sample-start", type=int, default=0,
+                    help="first sample index (files are <card>_s<index>); use 5 to extend an earlier 5-per-card run")
+    ap.add_argument("--append", action="store_true",
+                    help="add to an existing out_dir: keep its manifest/skipped rows, refuse to overwrite samples")
+    ap.add_argument("--max-new", type=int, default=None,
+                    help="stop after exactly N new samples; cards are visited in a seeded random order")
     args = ap.parse_args(argv)
+    args.budget = args.max_new
 
     try:
         check_raqm()
@@ -757,10 +783,17 @@ def main(argv=None) -> int:
             cards = cards[:args.limit]
         if not cards:
             raise SynthError(f"no card images with coords in {cards_dir}")
-        print(f"{len(cards)} card(s), {args.samples} sample(s) each -> {out_dir}")
+        cap = f", at most {args.max_new} new" if args.max_new is not None else ""
+        print(f"{len(cards)} card(s), {args.samples} sample(s) each from s{args.sample_start:02d}{cap} -> {out_dir}")
+
+        if args.max_new is not None:   # unbiased pick when the cap cuts the run short
+            order = np.random.default_rng(card_seed(bc["seed"], f"order#{args.sample_start}")).permutation(len(cards))
+            cards = [cards[i] for i in order]
 
         rows, total = [], 0
         for img_path, coords_path in cards:
+            if args.budget is not None and args.budget <= 0:
+                break
             try:
                 total += process_card(img_path, coords_path, cfg, bc, data, gt_dir, out_dir, args, rows, skipped)
             except SynthError as e:
@@ -768,6 +801,23 @@ def main(argv=None) -> int:
                 skipped.append({"card": img_path.stem, "sample": "all", "reason": str(e)})
 
         out_dir.mkdir(parents=True, exist_ok=True)
+        if args.append:
+            def old_rows(name):
+                p = out_dir / name
+                if not p.is_file():
+                    return []
+                with open(p, newline="", encoding="utf-8-sig") as f:
+                    return list(csv.DictReader(f))
+            rows = old_rows("manifest.csv") + rows
+            seen, merged = set(), []
+            for k in old_rows("skipped.csv") + skipped:
+                if "sample" not in k:     # pre-fix skipped.csv had (card, reason) only
+                    continue
+                key = (k["card"], str(k["sample"]), k["reason"])
+                if key not in seen:
+                    seen.add(key)
+                    merged.append(k)
+            skipped = merged
         with open(out_dir / "manifest.csv", "w", newline="", encoding="utf-8-sig") as f:
             w = csv.DictWriter(f, fieldnames=MANIFEST_FIELDS)
             w.writeheader()

@@ -47,6 +47,8 @@ layouts:
     nid_separator: " "
 
     # FILL: old cards print the English name in Title Case, not ALL CAPS.
+    # (Most old cards; synthesize_front.py takes the case of each source card
+    # from front.styles_file instead -- many old cards print ALL CAPS.)
     english_name_all_caps: false
 
     # FILL: old cards keep every value on a single line.
@@ -257,3 +259,75 @@ back:
   line_pitch_fallback: 1.9     # line pitch / matra-baseline height, for one-line originals
   strip_pad_ratio: 0.25        # strip crop padding, as a share of the line pitch
   box_margin_px: 2             # label box = rendered ink + this margin
+
+# -----------------------------------------------------------------------------
+# Front side -- synthesize_front.py
+# Makes `total` new front cards from the real ones: values are erased and
+# redrawn at the size measured on each source card. The template, augment,
+# generation, layouts and fields settings above are reused. Long values get a
+# smaller font instead of a shorter text; every other value keeps the exact size.
+# -----------------------------------------------------------------------------
+front:
+  images_dir: images
+  coords_dir: coordinates            # <image name>.txt: YOLO boxes, 6 classes
+  layout_folders:                    # subfolder of images_dir -> card type
+    images_old: old
+    images_smart: smart
+  out_dir: synthetic/front
+  total: 500                         # images to make, spread evenly over the source cards
+  seed: 2025
+  max_retries: 6                     # new values tried when a sample fails the checks
+
+  # Long values: a value wider than the free space on its line is drawn with a
+  # smaller font (baseline and start stay put) instead of being cut short.
+  long_name_fraction: 0.20           # share of samples that make one name long enough to need it
+  min_font_scale: 0.65               # never shrink below this share of the measured size
+
+  # Exact sizes. Each field's size comes from the height measured on its source
+  # card, corrected for the measuring bias of real Bangla text (~12% taller than
+  # the plain reference string the font is matched against). One Bangla
+  # measurement is only good to ~7%, so the six sizes of a card are also
+  # compared with the typical proportions of its card type (fitted over all
+  # source cards): a field's size is part its own measurement, part the model.
+  model_weight: 0.75                 # share of a field's size taken from the model (0 = own measurement only)
+  measure_noise: 0.03                # pixel-level noise of one measurement (log), added to the letter-dependent noise
+  size_tolerance: 0.15               # within this (log ratio) of the model: the own measurement is used (blended)
+  skip_tolerance: 0.35               # further off than this: the card's measurements are unusable
+  model_min_cards: 20                # fewer cards per type than this: no model, bias-corrected measurements only
+  fit_search_px: 1.0                 # font sizes tried around the exact one (hinting makes heights jump)
+
+  # Old cards print 10, 13 or 17 digits; the count of each source card is
+  # inferred from the width of its NID next to its height. Smart cards: 10.
+  nid_formats:
+    old:   [{digits: 10, groups: [10]}, {digits: 13, groups: [13]}, {digits: 17, groups: [17]}]
+    smart: [{digits: 10, groups: [3, 3, 4]}]
+  strip_pad_px: 2                    # field strip = box + this many pixels
+
+  # Typeface of each source card. Old cards differ card to card: the Bangla name
+  # (on a few cards also the parents' names) is bold or regular, the English
+  # name is in CAPS or Title Case and bold or regular, DOB and NID are bold or
+  # regular, and a few print their Latin text in a serif face. Blur makes this
+  # too unreliable to measure on small scans, so `styles_file` holds one row per
+  # card, labelled by eye (the style only, never the text):
+  #   card, name_bn, parents, name_en_case, name_en, dob, nid, latin
+  #   regular|bold for weights, caps|title for name_en_case, sans|serif for latin.
+  # A card not in the file (or a blank cell) draws its style once, seeded, from
+  # the shares among the labelled cards of its type; a type with fewer than
+  # `style_min_labels` labelled cards uses `style_defaults` instead.
+  styles_file: front_styles.csv
+  style_min_labels: 10
+  style_defaults:
+    old:   {name_bn: regular, parents: regular, name_en_case: title, name_en: regular,
+            dob: regular, nid: bold, latin: sans}
+    smart: {name_bn: bold, parents: regular, name_en_case: caps, name_en: bold,
+            dob: regular, nid: bold, latin: sans}
+  # Latin families: a field's configured font names its family (as its regular
+  # or bold face); the card's weight picks the face, `latin: serif` swaps the
+  # family for `serif`. Fonts in no family (Kalpurush has no bold face) are
+  # made bold by thickening the outline by `faux_bold` x the font size
+  # (0.035 matches the heavy bold Bangla names printed on the cards).
+  latin_faces:
+    sans:        {regular: "C:/Windows/Fonts/arial.ttf",  bold: "C:/Windows/Fonts/arialbd.ttf"}
+    sans_narrow: {regular: "C:/Windows/Fonts/ARIALN.TTF", bold: "C:/Windows/Fonts/ARIALNB.TTF"}
+    serif:       {regular: "C:/Windows/Fonts/times.ttf",  bold: "C:/Windows/Fonts/timesbd.ttf"}
+  faux_bold: 0.035

@@ -193,3 +193,7 @@ synthetic/back/*
 /coordinates
 # Back-side (address) synthesis outputs
 synthetic/back/
+
+
+synthetic/front/*
+synthetic/front/
