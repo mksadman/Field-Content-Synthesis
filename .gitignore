@@ -188,6 +188,8 @@ synthetic/templates/*
 # Degraded outputs
 synthetic/degraded/
 synthetic/degraded_rendered/
+synthetic/framing/
+synthetic/framing_rendered/
 synthetic/back/*
 
 /coordinates
